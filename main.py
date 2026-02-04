@@ -4,6 +4,8 @@ import os
 import hashlib
 import time
 import base64
+from watchdog.observers import Observer 
+from watchdog.events import FileSystemEventHandler
 
 file_list = []
 HOME = os.getenv("HOME")
@@ -12,6 +14,18 @@ db = os.path.join(HOME, '.local', 'sync.db')
 con = sqlite3.connect(db)
 cur = con.cursor()
 
+class Watcher(FileSystemEventHandler):
+    def __init__(self, process_callback):
+        self.process_callback = process_callback
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            if event.src_path is not db:
+                self.process_callback(event.src_path)
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self.process_callback(event.src_path)
 
 def log(ltype, message):
     typem = {1: '[INF]', 2: '[WARN]', 3: '[ERR]'}
@@ -63,12 +77,27 @@ def first_index(paths):
         except TypeError as e:
             print(e)
             cur.execute("ROLLBACK")
-def main(paths: str):
 
+def handle_file(file):
+    try:
+        log(1, f"attempting to process file: {file}")
+        res, mtime = process_file(file)
+        rows = cur.execute("SELECT file_hash, path FROM files WHERE file_hash=?", (res))
+        if rows.fetchone() is None:
+            cur.execute("INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
+        else:
+            cur.execute("UPDATE files SET file_hash=?, date=? WHERE path=?", (res, file, mtime))
+        # handle server file verification and syncing later cause my neck HURTS from staring at my second monitor for 3 hours
+    except Exception as e:
+        log(3, f"processing file: {file} failed {e}")
+
+
+def main(paths: str):
     if (not verify_index()):
         log(1, "no index found, starting indexer")
         first_index(paths)
     log(1, "monitoring filesystem for changes")
+    watch = Watcher(process_callback=handle_file)
 
 
 if __name__ == '__main__':
