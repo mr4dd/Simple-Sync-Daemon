@@ -6,6 +6,7 @@ import time
 import base64
 from watchdog.observers import Observer 
 from watchdog.events import FileSystemEventHandler
+import paramiko
 
 file_list = []
 HOME = os.getenv("HOME")
@@ -82,23 +83,55 @@ def handle_file(file):
     try:
         log(1, f"attempting to process file: {file}")
         res, mtime = process_file(file)
-        rows = cur.execute("SELECT file_hash, path FROM files WHERE file_hash=?", (res))
+
+        rows = cur.execute(f"SELECT file_hash, path FROM files WHERE file_hash=?", (res))
         if rows.fetchone() is None:
-            cur.execute("INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
+            cur.execute(f"INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
         else:
-            cur.execute("UPDATE files SET file_hash=?, date=? WHERE path=?", (res, file, mtime))
+            cur.execute(f"UPDATE files SET file_hash=?, date=? WHERE path=?", (res, file, mtime))
         # handle server file verification and syncing later cause my neck HURTS from staring at my second monitor for 3 hours
     except Exception as e:
         log(3, f"processing file: {file} failed {e}")
 
+class RemoteHandler():
+    def __init__(self, client):
+        self.client = client
 
-def main(paths: str):
+    def process(self, file):
+        with self.client.open(remote_path, "rb") as f:
+            data = f.read()
+            digest = hashlib.md5(data).digest()
+            return base64.b64encode(digest)
+
+    def recurse(self, remote_path):
+        for entry in self.client.listdir_attr(remote_path):
+            full_path = f"{remote_path}/{entry.filename}"
+            mode = entry.st_mode
+
+            if stat.S_ISDIR(mode):
+                yield from first_index_remote(client, full_path)
+            elif stat.S_ISREG(mode):
+                yield full_path
+    
+    def index(self, path):
+        for file in self.recurse(self.client.normalize(path)):
+            yield self.process(file), file
+
+def index_remote(handler):
+    cur.execute("BEGIN")
+    for data, path in handler.index("files"):
+        cur.execute("INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)", (data, file, int(time.time())))
+    cur.execute("COMMIT")
+
+def main(paths: str, client):
+    handler = RemoteHandler(client)
     if (not verify_index()):
         log(1, "no index found, starting indexer")
         first_index(paths)
+        index_remote(handler)
+
     log(1, "monitoring filesystem for changes")
     watch = Watcher(process_callback=handle_file)
-
 
 if __name__ == '__main__':
     if (len(argv) <= 1):
@@ -112,4 +145,9 @@ if __name__ == '__main__':
         path TEXT,
         date INTEGER)""")
 
-    main(argv[1:])
+    transport = paramiko.Transport((argv[1], 22))
+    #TODO: get credentials and server from environment variables instead
+    transport.connect(username="placeholder", password="placeholder")
+    client = paramiko.SFTPClient.from_transport(transport)
+
+    main(argv[2:], client)
