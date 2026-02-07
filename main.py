@@ -7,10 +7,14 @@ import base64
 from watchdog.observers import Observer 
 from watchdog.events import FileSystemEventHandler
 import paramiko
+from dotenv import load_dotenv
 
 file_list = []
+
 HOME = os.getenv("HOME")
 db = os.path.join(HOME, '.local', 'sync.db')
+
+load_dotenv()
 
 con = sqlite3.connect(db)
 cur = con.cursor()
@@ -135,7 +139,8 @@ def main(paths: str, client):
 
 if __name__ == '__main__':
     if (len(argv) <= 1):
-        print("please provide a directory/list of directories to scan")
+        print("please provide a directory/list of directories to scan.")
+        print("sync [DIR]...")
         exit()
     if not os.path.isfile(db):
         log(2, "no DB detected, creating one now")
@@ -145,9 +150,16 @@ if __name__ == '__main__':
         path TEXT,
         date INTEGER)""")
 
-    transport = paramiko.Transport((argv[1], 22))
-    #TODO: get credentials and server from environment variables instead
-    transport.connect(username="placeholder", password="placeholder")
+    username = os.getenv("SYNCUSR")
+    password = os.getenv("SYNCPWD")
+    host = os.getenv("REMOTE")
+    port = os.getenv("PORT")
+    
+    if (username is None or password is None or host is None or port is None):
+        print("please supply all the required environment variables")
+        exit()
+    transport = paramiko.Transport((host, int(port)))
+    transport.connect(username=username, password=password)
     client = paramiko.SFTPClient.from_transport(transport)
 
-    main(argv[2:], client)
+    main(argv[1:], client)
