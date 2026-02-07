@@ -4,6 +4,7 @@ import os
 import hashlib
 import time
 import base64
+import stat
 from watchdog.observers import Observer 
 from watchdog.events import FileSystemEventHandler
 import paramiko
@@ -15,9 +16,9 @@ HOME = os.getenv("HOME")
 db = os.path.join(HOME, '.local', 'sync.db')
 
 load_dotenv()
+remote_dir = os.getenv("REMOTEDIR")
 
-con = sqlite3.connect(db)
-cur = con.cursor()
+cur = con = None
 
 class Watcher(FileSystemEventHandler):
     def __init__(self, process_callback):
@@ -48,7 +49,7 @@ def process_file(file):
     res = ''
     # ignoring big files for speed's sake, ideally i should be reading the file in chunks and hashing
     # incrementally but i just want this to work
-    if (size < 100 *1024^2):
+    if (size < 100 *1024**2):
         with open(file, 'rb') as fd:
             content = fd.read()
             hash_digest = hashlib.md5(content).digest()
@@ -80,7 +81,7 @@ def first_index(paths):
             end = time.time()
             log(1, f"indexed {file_count} files in {end - start} seconds")
         except TypeError as e:
-            print(e)
+            log(3, str(e))
             cur.execute("ROLLBACK")
 
 def handle_file(file):
@@ -102,10 +103,14 @@ class RemoteHandler():
         self.client = client
 
     def process(self, file):
-        with self.client.open(remote_path, "rb") as f:
-            data = f.read()
-            digest = hashlib.md5(data).digest()
-            return base64.b64encode(digest)
+        try:
+            with self.client.open(file, "rb") as f:
+                data = f.read()
+                digest = hashlib.md5(data).digest()
+                return base64.b64encode(digest)
+        except Exception as e:
+            log(3, f"an exception occured while trying to process {file}. {e}")
+            return -1
 
     def recurse(self, remote_path):
         for entry in self.client.listdir_attr(remote_path):
@@ -113,8 +118,8 @@ class RemoteHandler():
             mode = entry.st_mode
 
             if stat.S_ISDIR(mode):
-                yield from first_index_remote(client, full_path)
-            elif stat.S_ISREG(mode):
+                yield from self.recurse(full_path)
+            elif stat.S_ISREG(mode) and entry.st_size < 100 * 1024**2:
                 yield full_path
     
     def index(self, path):
@@ -122,10 +127,17 @@ class RemoteHandler():
             yield self.process(file), file
 
 def index_remote(handler):
+    files = 0;
+    timebefore = time.time()
     cur.execute("BEGIN")
-    for data, path in handler.index("files"):
-        cur.execute("INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)", (data, file, int(time.time())))
+    for data, path in handler.index(remote_dir):
+        if data == -1:
+            continue
+        cur.execute("INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)", (data, path, int(time.time())))
+        files += 1
     cur.execute("COMMIT")
+    timeafter = time.time()
+    log(1, f"indexed {files} files in {timeafter - timebefore} seconds")
 
 def main(paths: str, client):
     handler = RemoteHandler(client)
@@ -143,12 +155,24 @@ if __name__ == '__main__':
         print("sync [DIR]...")
         exit()
     if not os.path.isfile(db):
+        con = sqlite3.connect(db)
+        cur = con.cursor()
         log(2, "no DB detected, creating one now")
+
         cur.execute("""CREATE TABLE IF NOT EXISTS files(
         idx INTEGER PRIMARY KEY AUTOINCREMENT,
         file_hash TEXT,
         path TEXT,
         date INTEGER)""")
+
+        cur.execute("""CREATE TABLE IF NOT EXISTS remote(
+        idx INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_hash TEXT,
+        path TEXT,
+        date INTEGER)""")
+    else:
+        con = sqlite3.connect(db)
+        cur = con.cursor()
 
     username = os.getenv("SYNCUSR")
     password = os.getenv("SYNCPWD")
