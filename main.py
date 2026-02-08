@@ -46,21 +46,22 @@ def verify_index():
     else:
         return True
 
-def process_file(file):
-    size = os.path.getsize(file)
-    res = ''
-    # ignoring big files for speed's sake, ideally i should be reading the file in chunks and hashing
-    # incrementally but i just want this to work
-    if (size < MAX_FILE_SIZE):
-        with open(file, 'rb') as fd:
-            content = fd.read()
-            hash_digest = hashlib.sha256(content).digest()
-            res = base64.b64encode(hash_digest)
-    modify_time = os.path.getmtime(file)
+class LocalHandler():
+    def process_file(self, file):
+        size = os.path.getsize(file)
+        res = ''
+        # ignoring big files for speed's sake, ideally i should be reading the file in chunks and hashing
+        # incrementally but i just want this to work
+        if (size < MAX_FILE_SIZE):
+            with open(file, 'rb') as fd:
+                content = fd.read()
+                hash_digest = hashlib.sha256(content).digest()
+                res = base64.b64encode(hash_digest)
+        modify_time = os.path.getmtime(file)
 
-    return res, modify_time
+        return res, modify_time
 
-def first_index(paths):
+    def first_index(self, paths):
         cur.execute("BEGIN")
         try:
             start = time.time()
@@ -70,7 +71,7 @@ def first_index(paths):
                     for file in files:
                         file = os.path.join(root,file)
                         try:
-                            res, mtime = process_file(file)
+                            res, mtime = self.process_file(file)
                             if res == '':
                                 continue
                             cur.execute("INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)",
@@ -84,6 +85,7 @@ def first_index(paths):
                 cur.execute("COMMIT")
             end = time.time()
             log(1, f"indexed {file_count} files in {end - start} seconds")
+        
         except TypeError as e:
             log(3, str(e))
             cur.execute("ROLLBACK")
@@ -119,7 +121,7 @@ class RemoteHandler():
 
     def recurse(self, remote_path):
         for entry in self.client.listdir_attr(remote_path):
-            full_path = f"{remote_path}/{entry.filename}"
+            full_path = os.path.join(remote_path, entry.filename)
             mode = entry.st_mode
 
             if stat.S_ISDIR(mode):
@@ -134,7 +136,9 @@ class RemoteHandler():
 def index_remote(handler):
     files = 0;
     timebefore = time.time()
+
     log(1, "indexing remote files, this may take a while")
+    
     cur.execute("BEGIN")
     for data, path in handler.index(remote_dir):
         if data == -1:
@@ -142,6 +146,7 @@ def index_remote(handler):
         cur.execute("INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)", (data, path, int(time.time())))
         files += 1
     cur.execute("COMMIT")
+
     timeafter = time.time()
     log(1, f"indexed {files} files in {timeafter - timebefore} seconds")
 
@@ -149,12 +154,11 @@ def main(paths: str, client):
     handler = RemoteHandler(client)
     if (not verify_index()):
         log(1, "no index found, starting indexer")
-        first_index(paths)
+        LocalHandler().first_index(paths)
         index_remote(handler)
     
     # syncing the files that only exist on the client to the server
     # before monitoring changes
-    
     
     log(1, "monitoring filesystem for changes")
     watch = Watcher(process_callback=handle_file)
@@ -194,6 +198,7 @@ if __name__ == '__main__':
     if (username is None or password is None or host is None or port is None):
         print("please supply all the required environment variables")
         exit()
+
     transport = paramiko.Transport((host, int(port)))
     transport.set_keepalive(30)
     transport.connect(username=username, password=password)
