@@ -20,6 +20,8 @@ remote_dir = os.getenv("REMOTEDIR")
 
 cur = con = None
 
+MAX_FILE_SIZE=100*1024**2
+
 class Watcher(FileSystemEventHandler):
     def __init__(self, process_callback):
         self.process_callback = process_callback
@@ -49,7 +51,7 @@ def process_file(file):
     res = ''
     # ignoring big files for speed's sake, ideally i should be reading the file in chunks and hashing
     # incrementally but i just want this to work
-    if (size < 100 *1024**2):
+    if (size < MAX_FILE_SIZE):
         with open(file, 'rb') as fd:
             content = fd.read()
             hash_digest = hashlib.md5(content).digest()
@@ -74,7 +76,7 @@ def first_index(paths):
                             )
                             file_count += 1
                         except Exception as e:
-                            log(3, "file processing failed for " + file + " " + str(e))
+                            log(3, f"file processing failed for {file}: {e}")
                             continue
 
                 cur.execute("COMMIT")
@@ -93,8 +95,8 @@ def handle_file(file):
         if rows.fetchone() is None:
             cur.execute(f"INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
         else:
-            cur.execute(f"UPDATE files SET file_hash=?, date=? WHERE path=?", (res, file, mtime))
-        # handle server file verification and syncing later cause my neck HURTS from staring at my second monitor for 3 hours
+            cur.execute(f"UPDATE files SET file_hash=?, date=? WHERE path=?", (res, mtime, file))
+
     except Exception as e:
         log(3, f"processing file: {file} failed {e}")
 
@@ -119,7 +121,7 @@ class RemoteHandler():
 
             if stat.S_ISDIR(mode):
                 yield from self.recurse(full_path)
-            elif stat.S_ISREG(mode) and entry.st_size < 100 * 1024**2:
+            elif stat.S_ISREG(mode) and entry.st_size < MAX_FILE_SIZE:
                 yield full_path
     
     def index(self, path):
@@ -129,6 +131,7 @@ class RemoteHandler():
 def index_remote(handler):
     files = 0;
     timebefore = time.time()
+    log(1, "indexing remote files, this may take a while")
     cur.execute("BEGIN")
     for data, path in handler.index(remote_dir):
         if data == -1:
@@ -145,15 +148,21 @@ def main(paths: str, client):
         log(1, "no index found, starting indexer")
         first_index(paths)
         index_remote(handler)
-
+    
+    # syncing the files that only exist on the client to the server
+    # before monitoring changes
+    
+    
     log(1, "monitoring filesystem for changes")
     watch = Watcher(process_callback=handle_file)
 
 if __name__ == '__main__':
+    
     if (len(argv) <= 1):
         print("please provide a directory/list of directories to scan.")
         print("sync [DIR]...")
         exit()
+    
     if not os.path.isfile(db):
         con = sqlite3.connect(db)
         cur = con.cursor()
