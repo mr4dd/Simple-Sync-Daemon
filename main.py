@@ -54,7 +54,7 @@ def process_file(file):
     if (size < MAX_FILE_SIZE):
         with open(file, 'rb') as fd:
             content = fd.read()
-            hash_digest = hashlib.md5(content).digest()
+            hash_digest = hashlib.sha256(content).digest()
             res = base64.b64encode(hash_digest)
     modify_time = os.path.getmtime(file)
 
@@ -71,6 +71,8 @@ def first_index(paths):
                         file = os.path.join(root,file)
                         try:
                             res, mtime = process_file(file)
+                            if res == '':
+                                continue
                             cur.execute("INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)",
                                         (res, file, mtime)
                             )
@@ -90,7 +92,8 @@ def handle_file(file):
     try:
         log(1, f"attempting to process file: {file}")
         res, mtime = process_file(file)
-
+        if res == '':
+            return
         rows = cur.execute(f"SELECT file_hash, path FROM files WHERE file_hash=?", (res))
         if rows.fetchone() is None:
             cur.execute(f"INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
@@ -108,7 +111,7 @@ class RemoteHandler():
         try:
             with self.client.open(file, "rb") as f:
                 data = f.read()
-                digest = hashlib.md5(data).digest()
+                digest = hashlib.sha256(data).digest()
                 return base64.b64encode(digest)
         except Exception as e:
             log(3, f"an exception occured while trying to process {file}. {e}")
@@ -192,6 +195,7 @@ if __name__ == '__main__':
         print("please supply all the required environment variables")
         exit()
     transport = paramiko.Transport((host, int(port)))
+    transport.set_keepalive(30)
     transport.connect(username=username, password=password)
     client = paramiko.SFTPClient.from_transport(transport)
 
