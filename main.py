@@ -69,7 +69,8 @@ class FileManager():
     def create_remote_path(self, dirtype: str, path: str)->str:
         remote_base = self.mappings[dirtype]
         local_stripped = self._strip_base(path)
-    
+        
+        # if there is an OS mismatch between the remote and the host this might cause problems
         remote = os.path.join(remote_base, local_stripped)
         return remote
 
