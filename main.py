@@ -9,6 +9,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import paramiko
 from dotenv import load_dotenv
+import json
+
 
 file_list = []
 
@@ -21,6 +23,55 @@ remote_dir = os.getenv("REMOTEDIR")
 cur = con = None
 
 MAX_FILE_SIZE=100*1024**2
+
+class FileManager():
+    def __init__(self, config_file):
+        self.mappings = self._load_mapping(config_file)
+        self.extensions = self._load_extensions(config_file)
+
+    def _load_mapping(self, config_file: str) -> dict:
+        with open(config_file, 'r') as cfd:
+            return json.load(cfd)["mappings"]
+
+    def _load_extensions(self, config_file: str) -> dict:
+        with open(config_file, 'r') as cfd:
+            return json.load(cfd)["extensions"]
+
+    def map_local_to_remote(self, path: str) -> str:
+        extension = path.split(".")[-1].lower()
+        filetype = ''
+        if extension in self.extensions["media"]:
+            filetype = "media"
+        elif extension in self.extensions["docs"]:
+            filetype = "docs"
+        elif extension in self.extensions["audio"]:
+            filetype = "audio"
+        else:
+            raise ValueError("extension unrecognized")
+      
+        return self.create_remote_path(filetype, path)
+
+    def _strip_base(self, path: str) -> str:
+        new_path = os.path.abspath(os.path.expanduser(path))
+        home = os.path.expanduser("~")
+
+        if new_path.startswith(home + os.sep):
+            relative_path = new_path[len(home)+1:]
+        else:
+            return new_path
+        
+        parts = relative_path.split(os.sep, 1)
+        if len(parts) == 2:
+            return parts[1] 
+        else:
+            return parts[0]
+
+    def create_remote_path(self, dirtype: str, path: str)->str:
+        remote_base = self.mappings[dirtype]
+        local_stripped = self._strip_base(path)
+    
+        remote = os.path.join(remote_base, local_stripped)
+        return remote
 
 class Watcher(FileSystemEventHandler):
     def __init__(self, process_callback):
