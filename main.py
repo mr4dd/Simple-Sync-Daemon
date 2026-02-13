@@ -185,6 +185,27 @@ class RemoteHandler():
         for file in self.recurse(self.client.normalize(path)):
             yield self.process(file), file
 
+    def ensure_dir_exists(self, path: str)->bool:
+        try:
+            self.client.stat(path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def rmkdir(self, path: str):
+        """
+            recursive mkdir on the remote
+        """
+        subdirs = path.split(os.sep)
+        builddir = ''
+        for sub in subdirs:
+            builddir = os.path.join(builddir,sub)
+            if self.ensure_dir_exists(builddir) == False:
+                try:
+                    self.client.mkdir(builddir)
+                except PermissionError:
+                    raise PermissionError(f"could not create directory {builddir}")
+
 def index_remote(handler):
     files = 0;
     timebefore = time.time()
@@ -202,8 +223,48 @@ def index_remote(handler):
     timeafter = time.time()
     log(1, f"indexed {files} files in {timeafter - timebefore} seconds")
 
+def find_diff()->list:
+    query_diff_hash = """
+        SELECT f.file_hash, f.path FROM files f LEFT JOIN remote r ON f.file_hash = r.file_hash WHERE r.path IS NULL
+    """
+    rows = cur.execute(query_diff_hash)
+    results = rows.fetchall()
+    if results is None:
+        return []
+    else:
+        file_paths: list = []
+        for result in results:
+            file_paths.append((result[0], result[1]))
+        
+        return file_paths
+
+def initial_sync(handler: RemoteHandler, fm: FileManager, files_to_be_synced: list[str]):
+    cur.execute("BEGIN")
+    for f in files_to_be_synced:
+        try:
+            file = fm.map_local_to_remote(f[1])
+            remote_directory = os.path.dirname(file)
+            exists = handler.ensure_dir_exists(remote_directory)
+            if exists == False:
+                log(1, f"creating remote directory {remote_dir}")
+                handler.rmkdir(remote_directory)
+            try:
+                log(1, f"trying to upload file {file}")
+                client.put(f[1], file)
+                query = """
+                INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)
+                """
+                cur.execute(query, (f[0], file, int(time.time())))
+            except Exception as e:
+                log(2, f"file {f[1]} could not be uploaded: {e}")
+        except ValueError as e:
+            log(2, f"{f} failed to make remote path: {e}")
+    cur.execute("COMMIT")
+
+
 def main(paths: str, client):
     handler = RemoteHandler(client)
+
     if (not verify_index()):
         log(1, "no index found, starting indexer")
         LocalHandler().first_index(paths)
@@ -211,7 +272,10 @@ def main(paths: str, client):
     
     # syncing the files that only exist on the client to the server
     # before monitoring changes
-    
+    files_to_be_synced = find_diff()
+    fm = FileManager("config.json")
+    initial_sync(handler, fm, files_to_be_synced)
+
     log(1, "monitoring filesystem for changes")
     watch = Watcher(process_callback=handle_file)
 
