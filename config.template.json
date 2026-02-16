@@ -1,0 +1,56 @@
+{
+    "mappings": {
+        "comment": "cant add another category without changing code, this is a limitation of the approach I took but it is acceptable because it was within parameters for what I wanted out of this tool, the categories map to paths on the remote host, these are examples but you can change them to suit your use case.",
+        "media":"files/Pictures/",
+        "docs":"files/Documents/",
+        "audio":"files/Music/"
+    },
+    "extensions": {
+        "comment": "I basically just picked out all the file extensions i use regularly or semi regularly and put them in here, not comprehensive by any means but thats not the point, its json so it can be extended as need be",
+        "media":[
+          "mp4",
+          "avi",
+          "mkv",
+          "mov",
+          "wmv",
+          "flv",
+          "webp",
+          "jpeg",
+          "jpg",
+          "png",
+          "gif",
+          "bmp",
+          "tiff",
+          "svg"
+        ],
+        "docs":[
+          "txt",
+          "doc",
+          "docx",
+          "pdf",
+          "odt",
+          "rtf",
+          "md",
+          "tex",
+          "xls",
+          "xlsx",
+          "ppt",
+          "pptx",
+          "csv",
+          "epub",
+          "yaml",
+          "ods"
+        ],
+        "audio":[
+          "mp3",
+          "wav",
+          "flac",
+          "aac",
+          "ogg",
+          "wma",
+          "m4a",
+          "aiff",
+          "alac"
+        ]
+    }
+}
