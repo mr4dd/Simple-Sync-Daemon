@@ -10,12 +10,15 @@ from watchdog.events import FileSystemEventHandler
 import paramiko
 from dotenv import load_dotenv
 import json
+from functools import partial
+from threading import Timer
 
 
 file_list = []
 
 HOME = os.getenv("HOME")
 db = os.path.join(HOME, '.local', 'sync.db')
+logfile = os.path.join(HOME, '.simplesync.log')
 
 load_dotenv()
 remote_dir = os.getenv("REMOTEDIR")
@@ -75,28 +78,25 @@ class FileManager():
         return remote
 
 class Watcher(FileSystemEventHandler):
-    def __init__(self, process_callback):
+    def __init__(self, process_callback, delay=0.5):
         self.process_callback = process_callback
+        self.delay = delay
+        self._timer = None
+
+    def debounce_event(self, event):
+        if self._timer:
+            self._timer.cancel()
+        self._timer = Timer(self.delay, self.process_callback, [event.src_path])
+        self._timer.start()
 
     def on_modified(self, event):
         if not event.is_directory:
             if event.src_path is not db:
-                self.process_callback(event.src_path)
-
+                self.debounce_event(event)
     def on_created(self, event):
         if not event.is_directory:
-            self.process_callback(event.src_path)
-
-def log(ltype, message):
-    typem = {1: '[INF]', 2: '[WARN]', 3: '[ERR]'}
-    print(f"{argv[0]} {time.time()} {typem[ltype]}: {message}")
-
-def verify_index():
-    rows = cur.execute('SELECT date FROM files LIMIT 1')
-    if rows.fetchone() is None:
-        return False
-    else:
-        return True
+            if event.src_path is not db:
+                self.debounce_event(event)
 
 class LocalHandler():
     def process_file(self, file):
@@ -108,7 +108,7 @@ class LocalHandler():
             with open(file, 'rb') as fd:
                 content = fd.read()
                 hash_digest = hashlib.sha256(content).digest()
-                res = base64.b64encode(hash_digest)
+                res = base64.b64encode(hash_digest).decode('utf-8')
         modify_time = os.path.getmtime(file)
 
         return res, modify_time
@@ -142,20 +142,19 @@ class LocalHandler():
             log(3, str(e))
             cur.execute("ROLLBACK")
 
-def handle_file(file):
-    try:
-        log(1, f"attempting to process file: {file}")
-        res, mtime = process_file(file)
-        if res == '':
-            return
-        rows = cur.execute(f"SELECT file_hash, path FROM files WHERE file_hash=?", (res))
-        if rows.fetchone() is None:
-            cur.execute(f"INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
-        else:
-            cur.execute(f"UPDATE files SET file_hash=?, date=? WHERE path=?", (res, mtime, file))
+def log(ltype, message):
+    typem = {1: '[INF]', 2: '[WARN]', 3: '[ERR]'}
+    message = f"{argv[0]} {time.strftime('%X %x')} {typem[ltype]}: {message}"
+    print(message)
+    with open(logfile, 'a') as lfd:
+        lfd.write(message+'\n')
 
-    except Exception as e:
-        log(3, f"processing file: {file} failed {e}")
+def verify_index():
+    rows = cur.execute('SELECT date FROM files LIMIT 1')
+    if rows.fetchone() is None:
+        return False
+    else:
+        return True
 
 class RemoteHandler():
     def __init__(self, client):
@@ -206,6 +205,24 @@ class RemoteHandler():
                 except PermissionError:
                     raise PermissionError(f"could not create directory {builddir}")
 
+def handle_file(handler: RemoteHandler, fm: FileManager, file: str):
+    try:
+        with sqlite3.connect(db) as conn:
+            cur = conn.cursor()
+            log(1, f"attempting to process file: {file}")
+            res, mtime = LocalHandler().process_file(file)
+            if res == '':
+                return
+            rows = cur.execute(f"SELECT file_hash, path FROM files WHERE file_hash=?", (res,))
+            if rows.fetchone() is None:
+                cur.execute(f"INSERT INTO files(file_hash, path, date) VALUES(?, ?, ?)", (res, file, mtime))
+            else:
+                cur.execute(f"UPDATE files SET file_hash=?, date=? WHERE path=?", (res, mtime, file))
+        sync_files(handler, fm, [(res, file)])
+
+    except Exception as e:
+        log(3, f"processing file: {file} failed {e}")
+
 def index_remote(handler):
     files = 0;
     timebefore = time.time()
@@ -238,31 +255,33 @@ def find_diff()->list:
         
         return file_paths
 
-def initial_sync(handler: RemoteHandler, fm: FileManager, files_to_be_synced: list[str]):
-    cur.execute("BEGIN")
-    for f in files_to_be_synced:
-        try:
-            file = fm.map_local_to_remote(f[1])
-            remote_directory = os.path.dirname(file)
-            exists = handler.ensure_dir_exists(remote_directory)
-            if exists == False:
-                log(1, f"creating remote directory {remote_dir}")
-                handler.rmkdir(remote_directory)
+def sync_files(handler: RemoteHandler, fm: FileManager, files_to_be_synced: list[str]):
+    with sqlite3.connect(db) as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        for f in files_to_be_synced:
             try:
-                log(1, f"trying to upload file {file}")
-                client.put(f[1], file)
-                query = """
-                INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)
-                """
-                cur.execute(query, (f[0], file, int(time.time())))
-            except Exception as e:
-                log(2, f"file {f[1]} could not be uploaded: {e}")
-        except ValueError as e:
-            log(2, f"{f} failed to make remote path: {e}")
-    cur.execute("COMMIT")
+                file = fm.map_local_to_remote(f[1])
+                remote_directory = os.path.dirname(file)
+                exists = handler.ensure_dir_exists(remote_directory)
+                if exists == False:
+                    log(1, f"creating remote directory {remote_dir}")
+                    handler.rmkdir(remote_directory)
+                try:
+                    log(1, f"trying to upload file {file}")
+                    client.put(f[1], file)
+                    query = """
+                    INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)
+                    """
+                    cur.execute(query, (f[0], file, int(time.time())))
+                    conn.commit()
+                except Exception as e:
+                    log(2, f"file {f[1]} could not be uploaded: {e}")
+                    conn.rollback()
+            except ValueError as e:
+                log(2, f"{f} failed to make remote path: {e}")
 
-
-def main(paths: str, client):
+def main(paths: list[str], client):
     handler = RemoteHandler(client)
 
     if (not verify_index()):
@@ -273,11 +292,30 @@ def main(paths: str, client):
     # syncing the files that only exist on the client to the server
     # before monitoring changes
     files_to_be_synced = find_diff()
+    con.close()
+
     fm = FileManager("config.json")
-    initial_sync(handler, fm, files_to_be_synced)
+    sync_files(handler, fm, files_to_be_synced)
 
     log(1, "monitoring filesystem for changes")
-    watch = Watcher(process_callback=handle_file)
+    handler = partial(handle_file, handler, fm)
+    watch = Watcher(process_callback=handler)
+    observer = Observer()
+    for path in paths:
+        observer.schedule(watch, path, recursive=True)
+    observer.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log(1, "Keyboard interrupt recieved, exiting...")
+    except Exception as e:
+        log(3, f"Unknown exception occurred: {e}")
+    finally:
+        observer.stop()
+        observer.join()
+
 
 if __name__ == '__main__':
     
@@ -287,7 +325,7 @@ if __name__ == '__main__':
         exit()
     
     if not os.path.isfile(db):
-        con = sqlite3.connect(db)
+        con = sqlite3.connect(db, check_same_thread=False)
         cur = con.cursor()
         log(2, "no DB detected, creating one now")
 
@@ -303,7 +341,7 @@ if __name__ == '__main__':
         path TEXT,
         date INTEGER)""")
     else:
-        con = sqlite3.connect(db)
+        con = sqlite3.connect(db, check_same_thread=False)
         cur = con.cursor()
 
     username = os.getenv("SYNCUSR")
