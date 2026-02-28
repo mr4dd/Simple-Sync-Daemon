@@ -13,9 +13,6 @@ import json
 from functools import partial
 from threading import Timer
 
-
-file_list = []
-
 HOME = os.getenv("HOME")
 db = os.path.join(HOME, '.local', 'sync.db')
 logfile = os.path.join(HOME, '.simplesync.log')
@@ -26,6 +23,53 @@ remote_dir = os.getenv("REMOTEDIR")
 cur = con = None
 
 MAX_FILE_SIZE=100*1024**2
+
+class ConnectionManager():
+    def __init__(self, sftp_server: tuple, username: str, password: str):
+        self.sftp_server = sftp_server
+        self.username = username
+        self.password = password
+        self.transport = paramiko.Transport(self.sftp_server)
+        self.client = self._create_connection()
+
+    def _create_connection(self):
+        self.transport.set_keepalive(30)
+        self.transport.connect(username=self.username, password=self.password)
+        client = paramiko.SFTPClient.from_transport(self.transport)
+        return client
+
+    def _check_session(self):
+        if not self.transport.is_active():
+            self.transport.close()
+            self.client = _create_connection()
+
+    def upload(self, local: str, remote: str):
+        self._check_session()
+        try:
+            self.client.put(local, remote)
+        except Exception as e:
+            log(3, e)
+
+    def read_file(self, file: str)->bytes:
+        self._check_session()
+        with self.client.open(file, "rb") as fd:
+            return fd.read()
+
+    def list_dirattr(self, remote_path: str) -> list[str]:
+        self._check_session()
+        return self.client.listdir_attr(remote_path)
+
+    def normalize(self, path: str)-> str:
+        self._check_session()
+        return self.client.normalize(path)
+    
+    def stat(self, path: str)->str:
+        self._check_session()
+        return self.client.stat(path)
+    
+    def mkdir(self, path: str):
+        self._check_session()
+        self.client.mkdir(builddir)
 
 class FileManager():
     def __init__(self, config_file):
@@ -157,21 +201,20 @@ def verify_index():
         return True
 
 class RemoteHandler():
-    def __init__(self, client):
-        self.client = client
+    def __init__(self, connectionManager):
+        self.connectionManager = connectionManager
 
     def process(self, file):
         try:
-            with self.client.open(file, "rb") as f:
-                data = f.read()
-                digest = hashlib.sha256(data).digest()
-                return base64.b64encode(digest)
+            data = connectionManager.read_file(file)
+            digest = hashlib.sha256(data).digest()
+            return base64.b64encode(digest)
         except Exception as e:
             log(3, f"an exception occured while trying to process {file}. {e}")
             return -1
 
     def recurse(self, remote_path):
-        for entry in self.client.listdir_attr(remote_path):
+        for entry in self.connectionManager.list_dirattr(remote_path):
             full_path = os.path.join(remote_path, entry.filename)
             mode = entry.st_mode
 
@@ -181,12 +224,12 @@ class RemoteHandler():
                 yield full_path
     
     def index(self, path):
-        for file in self.recurse(self.client.normalize(path)):
+        for file in self.recurse(self.connectionManager.normalize(path)):
             yield self.process(file), file
 
     def ensure_dir_exists(self, path: str)->bool:
         try:
-            self.client.stat(path)
+            self.connectionManager.stat(path)
             return True
         except FileNotFoundError:
             return False
@@ -201,7 +244,7 @@ class RemoteHandler():
             builddir = os.path.join(builddir,sub)
             if self.ensure_dir_exists(builddir) == False:
                 try:
-                    self.client.mkdir(builddir)
+                    self.connectionManager.mkdir(builddir)
                 except PermissionError:
                     raise PermissionError(f"could not create directory {builddir}")
 
@@ -269,7 +312,7 @@ def sync_files(handler: RemoteHandler, fm: FileManager, files_to_be_synced: list
                     handler.rmkdir(remote_directory)
                 try:
                     log(1, f"trying to upload file {file}")
-                    client.put(f[1], file)
+                    handler.connectionManager.upload(f[1], file)
                     query = """
                     INSERT INTO remote(file_hash, path, date) VALUES(?, ?, ?)
                     """
@@ -281,8 +324,23 @@ def sync_files(handler: RemoteHandler, fm: FileManager, files_to_be_synced: list
             except ValueError as e:
                 log(2, f"{f} failed to make remote path: {e}")
 
-def main(paths: list[str], client):
-    handler = RemoteHandler(client)
+def getCreds():
+    username = os.getenv("SYNCUSR")
+    password = os.getenv("SYNCPWD")
+    host = os.getenv("REMOTE")
+    port = os.getenv("PORT")
+    
+    if (username is None or password is None or host is None or port is None):
+        print("please supply all the required environment variables")
+        exit()
+    
+    return (host, int(port)), username, password
+
+
+def main(paths: list[str]):
+    sftp_server, username, password = getCreds()
+    connectionManager = ConnectionManager(sftp_server, username, password)
+    handler = RemoteHandler(connectionManager)
 
     if (not verify_index()):
         log(1, "no index found, starting indexer")
@@ -304,7 +362,7 @@ def main(paths: list[str], client):
     for path in paths:
         observer.schedule(watch, path, recursive=True)
     observer.start()
-
+    
     try:
         while True:
             time.sleep(1)
@@ -344,18 +402,4 @@ if __name__ == '__main__':
         con = sqlite3.connect(db, check_same_thread=False)
         cur = con.cursor()
 
-    username = os.getenv("SYNCUSR")
-    password = os.getenv("SYNCPWD")
-    host = os.getenv("REMOTE")
-    port = os.getenv("PORT")
-    
-    if (username is None or password is None or host is None or port is None):
-        print("please supply all the required environment variables")
-        exit()
-
-    transport = paramiko.Transport((host, int(port)))
-    transport.set_keepalive(30)
-    transport.connect(username=username, password=password)
-    client = paramiko.SFTPClient.from_transport(transport)
-
-    main(argv[1:], client)
+    main(argv[1:])
