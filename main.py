@@ -41,7 +41,7 @@ class ConnectionManager():
     def _check_session(self):
         if not self.transport.is_active():
             self.transport.close()
-            self.client = _create_connection()
+            self.client = self._create_connection()
 
     def upload(self, local: str, remote: str):
         self._check_session()
