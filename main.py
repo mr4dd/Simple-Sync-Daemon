@@ -29,17 +29,18 @@ class ConnectionManager():
         self.sftp_server = sftp_server
         self.username = username
         self.password = password
-        self.transport = paramiko.Transport(self.sftp_server)
+        self.transport = None
         self.client = self._create_connection()
 
     def _create_connection(self):
+        self.transport = paramiko.Transport(self.sftp_server)
         self.transport.set_keepalive(30)
         self.transport.connect(username=self.username, password=self.password)
         client = paramiko.SFTPClient.from_transport(self.transport)
         return client
 
     def _check_session(self):
-        if not self.transport.is_active():
+        if not self.transport.is_active() or self.transport is None:
             self.transport.close()
             self.client = self._create_connection()
 
@@ -69,7 +70,7 @@ class ConnectionManager():
     
     def mkdir(self, path: str):
         self._check_session()
-        self.client.mkdir(builddir)
+        self.client.mkdir(path)
 
 class FileManager():
     def __init__(self, config_file):
