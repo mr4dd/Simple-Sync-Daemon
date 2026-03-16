@@ -215,14 +215,17 @@ class RemoteHandler():
             return -1
 
     def recurse(self, remote_path):
-        for entry in self.connectionManager.list_dirattr(remote_path):
-            full_path = os.path.join(remote_path, entry.filename)
-            mode = entry.st_mode
+        try:
+            for entry in self.connectionManager.list_dirattr(remote_path):
+                full_path = os.path.join(remote_path, entry.filename)
+                mode = entry.st_mode
 
-            if stat.S_ISDIR(mode):
-                yield from self.recurse(full_path)
-            elif stat.S_ISREG(mode) and entry.st_size < MAX_FILE_SIZE:
-                yield full_path
+                if stat.S_ISDIR(mode):
+                    yield from self.recurse(full_path)
+                elif stat.S_ISREG(mode) and entry.st_size < MAX_FILE_SIZE:
+                    yield full_path
+        except PermissionError as e:
+            log(3, f"an exception occured while recursing through remote directories: {e}")
     
     def index(self, path):
         for file in self.recurse(self.connectionManager.normalize(path)):
