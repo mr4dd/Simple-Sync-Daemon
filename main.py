@@ -207,7 +207,7 @@ class RemoteHandler():
 
     def process(self, file):
         try:
-            data = connectionManager.read_file(file)
+            data = self.connectionManager.read_file(file)
             digest = hashlib.sha256(data).digest()
             return base64.b64encode(digest)
         except Exception as e:
