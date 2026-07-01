@@ -179,7 +179,7 @@ class LocalHandler():
                             log(3, f"file processing failed for {file}: {e}")
                             continue
 
-                cur.execute("COMMIT")
+            cur.execute("COMMIT")
             end = time.time()
             log(1, f"indexed {file_count} files in {end - start} seconds")
         
@@ -277,6 +277,7 @@ def index_remote(handler):
     log(1, "indexing remote files, this may take a while")
     
     cur.execute("BEGIN")
+
     for data, path in handler.index(remote_dir):
         if data == -1:
             continue
